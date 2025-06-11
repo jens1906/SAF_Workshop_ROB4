@@ -1,0 +1,126 @@
+PROGRAM PLC_PRG
+VAR
+	state: UINT := 0;
+	timer: TON;
+	RFID: dc_ecp.Dtm425;
+	rfidData: dc_ecp.st_CPF_RfidData;
+	TCPclient: dc_ecp.TcpClientByteStream;
+	dataIn: UINT;
+	dataOut: STRING;
+	RfidDataOut: STRING;
+	DateTime: DATE_AND_TIME;
+	GetDateTimeFB: DTU.GetDateAndTime;
+	DateTimeString: STRING;
+	BACK: TON;
+	TotalXML: STRING[128];
+	DateTimeXML: STRING;
+	CarrierIdXML: STRING;
+	StationXML: STRING;
+END_VAR
+
+
+
+
+
+
+
+
+
+
+
+
+
+CASE state OF
+	0://Initialise and reset values/timer
+	IO.xMB20 := FALSE;
+	TCPclient.Connect(sIP:='172.20.66.150', uiPort:=12345);
+	timer(IN := FALSE, PT := T#10S);
+	BACK(IN := FALSE, PT := T#3S);
+	RFID.ClearError();	
+	state:=200;
+	
+	200://Start timer to go back (Just to make it easier for us)
+	BACK(IN := TRUE, PT := T#3S);
+	IO.xQA1_LEFT:=TRUE;
+	state:=201;
+	
+	201://When timer done go fourth (Just to make it easier for us)
+	IF BACK.Q  THEN
+		IO.xQA1_LEFT:=FALSE;
+		IO.xQA1_RIGHT :=TRUE;
+		state:=1;
+	END_IF
+	
+	1://Wait for RFID to be connected
+	IF RFID.xReady AND TCPclient.xConnected AND TCPclient.xReady THEN
+		RFID.Connect(usiNodeId:=32,usiNetworkId:=0,usiChannel:=1);
+		IO.xQA1_RIGHT :=TRUE;
+		state:=2;
+	END_IF
+	
+	2:// Wait for carrier and slow down
+	IF IO.xBG24 = TRUE THEN
+		IO.xQA1_SLOW:=TRUE;
+		state:=3;
+	END_IF
+	
+	3: //Turn off conveyer at final position
+	IF IO.xBG21 = TRUE THEN
+		IO.xQA1_RIGHT :=FALSE;
+		state :=4;
+	END_IF
+	
+	4://Read RFID data
+	RFID.ReadTag(uiStartAddress:=0, uiDataLength:=SIZEOF(rfidData), ADR(rfidData));
+	GetDateTimeFB.xExecute:=TRUE;	
+	state:=5;
+	
+	5://When RFID is read sent it over TCP
+	IF RFID.xReady AND GetDateTimeFB.xDone THEN
+		RfidDataOut:=INT_TO_STRING(dc_ecp.SwapWord(rfidData.uiCarrierID));
+		DateTime:=GetDateTimeFB.dtDateAndTime;
+		DateTimeString := DT_TO_STRING(DateTime);		
+		//dataOUT:=CONCAT(DateTimeString,RfidDataOut);
+		
+		DateTimeXML:=CONCAT('<date>',CONCAT(DateTimeString,'</date>'));
+		CarrierIdXML:=CONCAT('<carrierid>',CONCAT(RfidDataOut,'</carrierid>'));		
+		StationXML:=CONCAT('<stationid>',CONCAT('STCPLC_08','</stationid>'));	
+		TotalXML:=CONCAT('<station>',CONCAT(DateTimeXML,CONCAT(CarrierIdXML,CONCAT(StationXML,'</station>'))));
+	
+		TCPclient.Send(pToSend:=ADR(TotalXML), uiSizeToSend:=SIZEOF(TotalXML));	
+		state:=6;			
+	END_IF
+	
+	6://Wait for TCP to be ready and read what is sent
+	IF TCPclient.xReady THEN
+		TCPclient.Receive(pToReceive:=ADR(dataIn), uiSizeToReceive:=SIZEOF(datain));			
+		state:=7;
+	END_IF	
+
+	
+	7://Wait for the duration sent from TCP server
+	IF TCPclient.xReady THEN				
+	timer(IN := TRUE, PT := (T#1S * dataIn));
+	state:=8;
+	END_IF
+	
+	8://When timer is done, free carrier and reset conveyer speeds
+	IF timer.Q  THEN
+		IO.xQA1_RIGHT :=TRUE;
+		IO.xQA1_SLOW:=FALSE;
+		IO.xMB20 := TRUE;
+		state:=9;
+	END_IF
+	
+	9://Reset after carrier has passed
+	IF IO.xBG21 = FALSE THEN
+		IO.xMB20 := FALSE;
+		state:=0;
+	END_IF
+	
+END_CASE
+timer();
+BACK();
+RFID();
+TCPclient();
+GetDateTimeFB();
